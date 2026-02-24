@@ -86,6 +86,7 @@ async def main() -> None:
     auto_snapshot_interval = int(os.getenv("AUTO_SNAPSHOT_INTERVAL", "0"))
     auto_snapshot_max = int(os.getenv("AUTO_SNAPSHOT_MAX_ENTRIES", "200"))
     auto_repair = os.getenv("AUTO_REPAIR_ON_SNAPSHOT", "false").strip().lower() in {"1", "true", "yes"}
+    auto_snapshot_background = os.getenv("AUTO_SNAPSHOT_BACKGROUND", "false").strip().lower() in {"1", "true", "yes"}
     logging.info(
         "RAG config: source=%s azure_search_endpoint=%s azure_search_index=%s",
         rag_config.source,
@@ -93,10 +94,11 @@ async def main() -> None:
         azure_search_config.index_name,
     )
     logging.info(
-        "Auto snapshot: interval=%s max_entries=%s auto_repair=%s",
+        "Auto snapshot: interval=%s max_entries=%s auto_repair=%s background=%s",
         auto_snapshot_interval,
         auto_snapshot_max,
         auto_repair,
+        auto_snapshot_background,
     )
     logging.info(
         "Embedding config: provider=%s model=%s",
@@ -221,17 +223,20 @@ async def main() -> None:
             except Exception:
                 logging.exception("Embeddings unavailable: openai package not found")
                 return [[] for _ in texts]
-            client = AzureOpenAI(
-                api_key=embedding_config.azure_openai_api_key,
-                azure_endpoint=embedding_config.azure_openai_endpoint,
-                api_version=embedding_config.azure_openai_api_version,
-            )
             logging.info(
                 "Embedding request: provider=azure_openai model=%s count=%s",
                 embedding_config.model,
                 len(texts),
             )
-            resp = client.embeddings.create(model=embedding_config.model, input=texts)
+            def _embed_sync():
+                client = AzureOpenAI(
+                    api_key=embedding_config.azure_openai_api_key,
+                    azure_endpoint=embedding_config.azure_openai_endpoint,
+                    api_version=embedding_config.azure_openai_api_version,
+                )
+                return client.embeddings.create(model=embedding_config.model, input=texts)
+
+            resp = await asyncio.to_thread(_embed_sync)
             return [d.embedding for d in resp.data]
         logging.info("Embeddings skipped: unsupported provider=%s", embedding_config.provider)
         return [[] for _ in texts]
@@ -274,7 +279,7 @@ async def main() -> None:
             "entries": trimmed,
             "metadata": {"auto_snapshot": True},
         }
-        store_payload_fn(snapshot_id, payload, redis_config.redis_url)
+        await asyncio.to_thread(store_payload_fn, snapshot_id, payload, redis_config.redis_url)
         logging.info("Auto snapshot stored: %s entries=%s", snapshot_id, len(trimmed))
         if auto_repair and last_snapshot_id:
             repaired_id = f"{snapshot_id}_repaired"
@@ -282,6 +287,10 @@ async def main() -> None:
             logging.info("Auto repair stored: %s", repaired_id)
             return repaired_id
         return snapshot_id
+
+    def _clone_entries(memory_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Create an immutable snapshot payload for background processing.
+        return json.loads(json.dumps(memory_entries))
 
     if llm_config.provider == "azure_openai":
         if not llm_config.azure_openai_endpoint:
@@ -515,63 +524,112 @@ async def main() -> None:
         agent = _build_agent()
         thread = agent.get_new_thread()
         memory_entries: List[Dict[str, Any]] = []
-        last_snapshot_id: Optional[str] = None
         turn_count = 0
+        snapshot_state: Dict[str, Optional[str]] = {"last_snapshot_id": None}
+        snapshot_queue: asyncio.Queue[Optional[List[Dict[str, Any]]]] = asyncio.Queue()
+        snapshot_worker_task: Optional[asyncio.Task] = None
+
+        async def _run_snapshot_now(entries_snapshot: List[Dict[str, Any]]) -> None:
+            snapshot_state["last_snapshot_id"] = await _auto_snapshot(
+                entries_snapshot,
+                snapshot_state["last_snapshot_id"],
+                store_snapshot_payload,
+                repair_snapshot_llm,
+            )
+
+        async def _snapshot_worker() -> None:
+            while True:
+                job = await snapshot_queue.get()
+                try:
+                    if job is None:
+                        return
+                    await _run_snapshot_now(job)
+                except Exception:
+                    logging.exception("Background auto-snapshot job failed")
+                finally:
+                    snapshot_queue.task_done()
+
+        async def _schedule_snapshot_if_due() -> None:
+            if auto_snapshot_interval <= 0 or (turn_count % auto_snapshot_interval) != 0:
+                return
+            entries_snapshot = _clone_entries(memory_entries)
+            if auto_snapshot_background:
+                await snapshot_queue.put(entries_snapshot)
+            else:
+                await _run_snapshot_now(entries_snapshot)
+
+        async def _flush_snapshot_jobs() -> None:
+            if auto_snapshot_background:
+                await snapshot_queue.join()
+
+        async def _stop_snapshot_worker() -> None:
+            if snapshot_worker_task is not None:
+                await snapshot_queue.put(None)
+                await snapshot_queue.join()
+                await snapshot_worker_task
+
+        if auto_snapshot_background:
+            snapshot_worker_task = asyncio.create_task(_snapshot_worker())
+
         print("Reflective Memory Diffing Agent (Azure OpenAI)")
         print("Type 'exit' to quit.\n")
 
-        while True:
-            user_input = input("You: ").strip()
-            if user_input.lower() in {"exit", "quit"}:
-                break
-            if user_input.lower() in {"reset", "/reset"}:
-                thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
-                agent = _build_agent()
-                thread = agent.get_new_thread()
-                print("Agent: Thread reset.\n")
-                continue
-
-            queried_pref_key = _extract_preference_query_key(user_input)
-            if queried_pref_key:
-                pref_result = get_latest_preference(queried_pref_key)
-                if pref_result.startswith("Latest preference for"):
-                    value = pref_result.split(":", 1)[1].strip()
-                    response_text = f"Based on your most recent memory, your {queried_pref_key.replace('_', ' ')} is {value}."
-                else:
-                    response_text = pref_result
-                print(f"Agent: {response_text}\n")
-                memory_entries.append(_make_entry(user_input, "user"))
-                memory_entries.append(_make_entry(response_text, "assistant"))
-                turn_count += 1
-                if auto_snapshot_interval > 0 and (turn_count % auto_snapshot_interval == 0):
-                    last_snapshot_id = await _auto_snapshot(
-                        memory_entries, last_snapshot_id, store_snapshot_payload, repair_snapshot_llm
-                    )
-                continue
-
-            print("Agent: ", end="", flush=True)
-            try:
-                response = await agent.run(user_input, thread=thread)
-            except Exception as exc:
-                if "role 'tool' must be a response to a preceeding message" in str(exc):
+        try:
+            while True:
+                try:
+                    user_input = input("You: ").strip()
+                except EOFError:
+                    print("\nAgent: Input stream closed. Exiting.")
+                    break
+                if user_input.lower() in {"exit", "quit"}:
+                    break
+                if not user_input:
+                    continue
+                if user_input.lower() in {"reset", "/reset"}:
                     thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
                     agent = _build_agent()
                     thread = agent.get_new_thread()
-                    print("Agent: Thread was reset due to tool message ordering error. Please retry.\n")
+                    print("Agent: Thread reset.\n")
                     continue
-                raise
-            print(response.text)
-            print()
 
-            memory_entries.append(_make_entry(user_input, "user"))
-            for pref in _extract_preferences(user_input):
-                memory_entries.append(_make_entry(pref["content"], pref["source"], pref["metadata"]))
-            memory_entries.append(_make_entry(response.text or "", "assistant"))
-            turn_count += 1
-            if auto_snapshot_interval > 0 and (turn_count % auto_snapshot_interval == 0):
-                last_snapshot_id = await _auto_snapshot(
-                    memory_entries, last_snapshot_id, store_snapshot_payload, repair_snapshot_llm
-                )
+                queried_pref_key = _extract_preference_query_key(user_input)
+                if queried_pref_key:
+                    await _flush_snapshot_jobs()
+                    pref_result = get_latest_preference(queried_pref_key)
+                    if pref_result.startswith("Latest preference for"):
+                        value = pref_result.split(":", 1)[1].strip()
+                        response_text = f"Based on your most recent memory, your {queried_pref_key.replace('_', ' ')} is {value}."
+                    else:
+                        response_text = pref_result
+                    print(f"Agent: {response_text}\n")
+                    memory_entries.append(_make_entry(user_input, "user"))
+                    memory_entries.append(_make_entry(response_text, "assistant"))
+                    turn_count += 1
+                    await _schedule_snapshot_if_due()
+                    continue
+
+                print("Agent: ", end="", flush=True)
+                try:
+                    response = await agent.run(user_input, thread=thread)
+                except Exception as exc:
+                    if "role 'tool' must be a response to a preceeding message" in str(exc):
+                        thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
+                        agent = _build_agent()
+                        thread = agent.get_new_thread()
+                        print("Agent: Thread was reset due to tool message ordering error. Please retry.\n")
+                        continue
+                    raise
+                print(response.text)
+                print()
+
+                memory_entries.append(_make_entry(user_input, "user"))
+                for pref in _extract_preferences(user_input):
+                    memory_entries.append(_make_entry(pref["content"], pref["source"], pref["metadata"]))
+                memory_entries.append(_make_entry(response.text or "", "assistant"))
+                turn_count += 1
+                await _schedule_snapshot_if_due()
+        finally:
+            await _stop_snapshot_worker()
     else:
         async with (
             DefaultAzureCredential() as credential,
@@ -679,66 +737,115 @@ async def main() -> None:
             agent = _build_agent()
             thread = agent.get_new_thread()
             memory_entries: List[Dict[str, Any]] = []
-            last_snapshot_id: Optional[str] = None
             turn_count = 0
+            snapshot_state: Dict[str, Optional[str]] = {"last_snapshot_id": None}
+            snapshot_queue: asyncio.Queue[Optional[List[Dict[str, Any]]]] = asyncio.Queue()
+            snapshot_worker_task: Optional[asyncio.Task] = None
+
+            async def _run_snapshot_now(entries_snapshot: List[Dict[str, Any]]) -> None:
+                snapshot_state["last_snapshot_id"] = await _auto_snapshot(
+                    entries_snapshot,
+                    snapshot_state["last_snapshot_id"],
+                    store_snapshot_payload,
+                    repair_snapshot_llm,
+                )
+
+            async def _snapshot_worker() -> None:
+                while True:
+                    job = await snapshot_queue.get()
+                    try:
+                        if job is None:
+                            return
+                        await _run_snapshot_now(job)
+                    except Exception:
+                        logging.exception("Background auto-snapshot job failed")
+                    finally:
+                        snapshot_queue.task_done()
+
+            async def _schedule_snapshot_if_due() -> None:
+                if auto_snapshot_interval <= 0 or (turn_count % auto_snapshot_interval) != 0:
+                    return
+                entries_snapshot = _clone_entries(memory_entries)
+                if auto_snapshot_background:
+                    await snapshot_queue.put(entries_snapshot)
+                else:
+                    await _run_snapshot_now(entries_snapshot)
+
+            async def _flush_snapshot_jobs() -> None:
+                if auto_snapshot_background:
+                    await snapshot_queue.join()
+
+            async def _stop_snapshot_worker() -> None:
+                if snapshot_worker_task is not None:
+                    await snapshot_queue.put(None)
+                    await snapshot_queue.join()
+                    await snapshot_worker_task
+
+            if auto_snapshot_background:
+                snapshot_worker_task = asyncio.create_task(_snapshot_worker())
+
             print("Reflective Memory Diffing Agent (Foundry)")
             print("Type 'exit' to quit.\n")
 
-            while True:
-                user_input = input("You: ").strip()
-                if user_input.lower() in {"exit", "quit"}:
-                    break
-                if user_input.lower() in {"reset", "/reset"}:
-                    thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
-                    agent = _build_agent()
-                    thread = agent.get_new_thread()
-                    print("Agent: Thread reset.\n")
-                    continue
-
-                queried_pref_key = _extract_preference_query_key(user_input)
-                if queried_pref_key:
-                    pref_result = get_latest_preference(queried_pref_key)
-                    if pref_result.startswith("Latest preference for"):
-                        value = pref_result.split(":", 1)[1].strip()
-                        response_text = f"Based on your most recent memory, your {queried_pref_key.replace('_', ' ')} is {value}."
-                    else:
-                        response_text = pref_result
-                    print(f"Agent: {response_text}\n")
-                    memory_entries.append(_make_entry(user_input, "user"))
-                    memory_entries.append(_make_entry(response_text, "assistant"))
-                    turn_count += 1
-                    if auto_snapshot_interval > 0 and (turn_count % auto_snapshot_interval == 0):
-                        last_snapshot_id = await _auto_snapshot(
-                            memory_entries, last_snapshot_id, store_snapshot_payload, repair_snapshot_llm
-                        )
-                    continue
-
-                print("Agent: ", end="", flush=True)
-                try:
-                    response_text = ""
-                    async for chunk in agent.run_stream(user_input, thread=thread):
-                        if chunk.text:
-                            response_text += chunk.text
-                            print(chunk.text, end="", flush=True)
-                    print("\n")
-                except Exception as exc:
-                    if "role 'tool' must be a response to a preceeding message" in str(exc):
+            try:
+                while True:
+                    try:
+                        user_input = input("You: ").strip()
+                    except EOFError:
+                        print("\nAgent: Input stream closed. Exiting.")
+                        break
+                    if user_input.lower() in {"exit", "quit"}:
+                        break
+                    if not user_input:
+                        continue
+                    if user_input.lower() in {"reset", "/reset"}:
                         thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
                         agent = _build_agent()
                         thread = agent.get_new_thread()
-                        print("Agent: Thread was reset due to tool message ordering error. Please retry.\n")
+                        print("Agent: Thread reset.\n")
                         continue
-                    raise
 
-                memory_entries.append(_make_entry(user_input, "user"))
-                for pref in _extract_preferences(user_input):
-                    memory_entries.append(_make_entry(pref["content"], pref["source"], pref["metadata"]))
-                memory_entries.append(_make_entry(response_text, "assistant"))
-                turn_count += 1
-                if auto_snapshot_interval > 0 and (turn_count % auto_snapshot_interval == 0):
-                    last_snapshot_id = await _auto_snapshot(
-                        memory_entries, last_snapshot_id, store_snapshot_payload, repair_snapshot_llm
-                    )
+                    queried_pref_key = _extract_preference_query_key(user_input)
+                    if queried_pref_key:
+                        await _flush_snapshot_jobs()
+                        pref_result = get_latest_preference(queried_pref_key)
+                        if pref_result.startswith("Latest preference for"):
+                            value = pref_result.split(":", 1)[1].strip()
+                            response_text = f"Based on your most recent memory, your {queried_pref_key.replace('_', ' ')} is {value}."
+                        else:
+                            response_text = pref_result
+                        print(f"Agent: {response_text}\n")
+                        memory_entries.append(_make_entry(user_input, "user"))
+                        memory_entries.append(_make_entry(response_text, "assistant"))
+                        turn_count += 1
+                        await _schedule_snapshot_if_due()
+                        continue
+
+                    print("Agent: ", end="", flush=True)
+                    try:
+                        response_text = ""
+                        async for chunk in agent.run_stream(user_input, thread=thread):
+                            if chunk.text:
+                                response_text += chunk.text
+                                print(chunk.text, end="", flush=True)
+                        print("\n")
+                    except Exception as exc:
+                        if "role 'tool' must be a response to a preceeding message" in str(exc):
+                            thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
+                            agent = _build_agent()
+                            thread = agent.get_new_thread()
+                            print("Agent: Thread was reset due to tool message ordering error. Please retry.\n")
+                            continue
+                        raise
+
+                    memory_entries.append(_make_entry(user_input, "user"))
+                    for pref in _extract_preferences(user_input):
+                        memory_entries.append(_make_entry(pref["content"], pref["source"], pref["metadata"]))
+                    memory_entries.append(_make_entry(response_text, "assistant"))
+                    turn_count += 1
+                    await _schedule_snapshot_if_due()
+            finally:
+                await _stop_snapshot_worker()
 
 
 if __name__ == "__main__":

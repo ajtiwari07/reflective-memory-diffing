@@ -151,10 +151,14 @@ You can enable automatic memory snapshots from conversation turns:
 AUTO_SNAPSHOT_INTERVAL=3
 AUTO_SNAPSHOT_MAX_ENTRIES=200
 AUTO_REPAIR_ON_SNAPSHOT=true
+AUTO_SNAPSHOT_BACKGROUND=true
 ```
 
 When enabled, the agent will store snapshots in Redis every N turns and optionally
 run drift repair between the last snapshot and the new one.
+With `AUTO_SNAPSHOT_BACKGROUND=true`, snapshot+repair jobs are queued in a background
+worker to reduce chat latency. Preference queries flush pending jobs before lookup
+to keep latest-value consistency.
 
 ## Hallucination Benchmark
 
