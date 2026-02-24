@@ -2,6 +2,19 @@
 
 A Python app that uses **Microsoft Agent Framework** with a **Redis provider** and **Redis chat message store** to drive a reflective memory diffing assistant. The agent can compare two memory snapshot files and explain changes.
 
+## What The Agent Does
+
+The Reflective Memory Diffing Agent helps keep long-term memory reliable over time.
+It compares memory snapshots, detects drift, and applies repair actions to reduce stale or hallucinated memory.
+
+Core capabilities:
+
+- Tracks memory changes between snapshots (`added`, `removed`, `changed`).
+- Detects drift types (`contradiction`, `staleness`, `redundancy`, `hallucination`, `preference_update`).
+- Runs reflective prompting to choose repair actions (`rewrite`, `delete`, `annotate`, `keep`).
+- Uses optional RAG sources (Bing or Azure AI Search) during repair for external grounding.
+- Supports automatic snapshotting from conversation turns and optional auto-repair.
+
 ## Requirements
 
 - Python 3.10+
