@@ -143,6 +143,17 @@ AUTO_REPAIR_ON_SNAPSHOT=true
 When enabled, the agent will store snapshots in Redis every N turns and optionally
 run drift repair between the last snapshot and the new one.
 
+## Hallucination Benchmark
+
+An offline benchmark is available to quantify hallucination drift reduction:
+
+```powershell
+$env:PYTHONPATH="src"
+python tests/evals/run_hallucination_benchmark.py
+```
+
+Details and case format: `tests/evals/README.md`.
+
 ## Embeddings & Vector Search
 
 You can generate embeddings for snapshot entries and use Redis vector search

@@ -1,0 +1,359 @@
+{
+  "cases": [
+    {
+      "id": "hallucination_simple",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "The capital of Peru is Lima.",
+            "source": "external",
+            "confidence": 0.92,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-02T00:00:00Z",
+        "entries": [
+          {
+            "id": "e2",
+            "content": "XQZ blorf glanx.",
+            "source": "llm",
+            "confidence": 0.2,
+            "timestamp": "2026-02-02T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mixed_contradiction_hallucination",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "The sky is blue.",
+            "source": "external",
+            "confidence": 0.9,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-02T00:00:00Z",
+        "entries": [
+          {
+            "id": "e3",
+            "content": "The sky is not blue.",
+            "source": "llm",
+            "confidence": 0.4,
+            "timestamp": "2026-02-02T00:00:00Z"
+          },
+          {
+            "id": "e4",
+            "content": "ZZQ nonsense theorem for moon rivers.",
+            "source": "llm",
+            "confidence": 0.25,
+            "timestamp": "2026-02-02T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "non_hallucination_update",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "The capital of France is Paris.",
+            "source": "external",
+            "confidence": 0.95,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-02T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "The capital of France is Paris.",
+            "source": "external",
+            "confidence": 0.95,
+            "timestamp": "2026-02-02T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hallucination_medical_claim",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "Aspirin should be used based on clinical guidance.",
+            "source": "external",
+            "confidence": 0.9,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e2",
+            "content": "Aspirin cures all viral infections overnight.",
+            "source": "llm",
+            "confidence": 0.2,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hallucination_policy_claim",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "Tax filing deadlines vary by jurisdiction.",
+            "source": "external",
+            "confidence": 0.9,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e2",
+            "content": "All countries now use a single global tax return date of January 1.",
+            "source": "llm",
+            "confidence": 0.2,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hallucination_product_claim",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "Redis is an in-memory data structure store.",
+            "source": "external",
+            "confidence": 0.96,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e2",
+            "content": "Redis now requires quantum hardware to run.",
+            "source": "llm",
+            "confidence": 0.15,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "mixed_two_hallucinations",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": []
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "NQX protocol controls ocean weather from satellites.",
+            "source": "llm",
+            "confidence": 0.2,
+            "timestamp": "2026-02-03T00:00:00Z"
+          },
+          {
+            "id": "e2",
+            "content": "The moon's legal capital is Zebra City.",
+            "source": "llm",
+            "confidence": 0.22,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "staleness_without_hallucination",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "Policy bulletin 2020 applies to archived processes.",
+            "source": "external",
+            "confidence": 0.75,
+            "timestamp": "2024-01-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "Policy bulletin 2020 applies to archived processes.",
+            "source": "external",
+            "confidence": 0.75,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "preference_update_non_hallucination",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "p1",
+            "content": "User favorite cuisine is Italian.",
+            "source": "user",
+            "confidence": 0.95,
+            "timestamp": "2026-02-01T00:00:00Z",
+            "metadata": {
+              "preference_key": "favorite_cuisine",
+              "preference_value": "Italian",
+              "preference_subject": "user"
+            }
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "p2",
+            "content": "User favorite cuisine is Thai.",
+            "source": "user",
+            "confidence": 0.95,
+            "timestamp": "2026-02-03T00:00:00Z",
+            "metadata": {
+              "preference_key": "favorite_cuisine",
+              "preference_value": "Thai",
+              "preference_subject": "user"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "contradiction_and_hallucination_pair",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "Water boils at 100 C at sea level.",
+            "source": "external",
+            "confidence": 0.95,
+            "timestamp": "2026-02-01T00:00:00Z"
+          }
+        ]
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e2",
+            "content": "Water does not boil at 100 C at sea level.",
+            "source": "llm",
+            "confidence": 0.4,
+            "timestamp": "2026-02-03T00:00:00Z"
+          },
+          {
+            "id": "e3",
+            "content": "QAX theorem says numbers have flavors.",
+            "source": "llm",
+            "confidence": 0.2,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "benign_added_external_fact",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": []
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "The capital of Japan is Tokyo.",
+            "source": "external",
+            "confidence": 0.95,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hallucination_low_confidence_dense_text",
+      "old": {
+        "snapshot_id": "M_t-1",
+        "timestamp": "2026-02-01T00:00:00Z",
+        "entries": []
+      },
+      "new": {
+        "snapshot_id": "M_t",
+        "timestamp": "2026-02-03T00:00:00Z",
+        "entries": [
+          {
+            "id": "e1",
+            "content": "VXR administrative geometry rewrites legal time in triangles.",
+            "source": "llm",
+            "confidence": 0.18,
+            "timestamp": "2026-02-03T00:00:00Z"
+          }
+        ]
+      }
+    }
+  ]
+}

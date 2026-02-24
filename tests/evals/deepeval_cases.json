@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {
+      "id": "pref_latest",
+      "input": "What is my favorite cuisine?",
+      "context": [
+        "User favorite cuisine is Thai."
+      ],
+      "actual_output": "Based on your most recent memory, your favorite cuisine is Thai.",
+      "expected_output": "Thai"
+    },
+    {
+      "id": "president_france",
+      "input": "Who is the president of France?",
+      "context": [
+        "No memory found about the president of France."
+      ],
+      "actual_output": "General knowledge: The President of France is Emmanuel Macron.",
+      "expected_output": "Emmanuel Macron"
+    },
+    {
+      "id": "avoid_hallucination",
+      "input": "Who is SME for Scaling in OSS redis?",
+      "context": [
+        "No verified memory found."
+      ],
+      "actual_output": "Based on your provided memories, there is no information regarding the SME for Scaling in OSS Redis.",
+      "expected_output": "No information found"
+    }
+  ]
+}

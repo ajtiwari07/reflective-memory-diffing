@@ -7,3 +7,4 @@ python-dotenv
 pytest
 redis
 jsonschema
+deepeval
