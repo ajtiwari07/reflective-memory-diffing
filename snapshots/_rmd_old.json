@@ -1,0 +1,13 @@
+{
+  "snapshot_id": "M_t-1",
+  "timestamp": "2026-02-01T00:00:00Z",
+  "entries": [
+    {
+      "id": "e1",
+      "content": "The capital of Peru is Lima.",
+      "source": "external",
+      "confidence": 0.92,
+      "timestamp": "2026-02-01T00:00:00Z"
+    }
+  ]
+}

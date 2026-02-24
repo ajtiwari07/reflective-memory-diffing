@@ -1,0 +1,13 @@
+{
+  "snapshot_id": "M_t",
+  "timestamp": "2026-02-12T00:00:00Z",
+  "entries": [
+    {
+      "id": "e2",
+      "content": "The capital of Peru is not Lima.",
+      "source": "llm",
+      "confidence": 0.3,
+      "timestamp": "2026-02-12T00:00:00Z"
+    }
+  ]
+}

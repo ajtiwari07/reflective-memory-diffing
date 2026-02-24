@@ -1,0 +1,11 @@
+# Environment files
+.env
+.env.*
+!.env.example
+config/.env
+config/.env.*
+!config/.env.example
+
+# Runtime logs
+logs/
+*.log

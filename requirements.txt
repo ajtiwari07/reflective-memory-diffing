@@ -1,0 +1,9 @@
+# NOTE: Agent Framework packages are currently in preview
+agent-framework-azure-ai
+agent-framework-redis
+azure-identity
+azure-ai-projects
+python-dotenv
+pytest
+redis
+jsonschema
