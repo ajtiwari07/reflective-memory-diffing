@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from uuid import uuid4
@@ -87,6 +88,9 @@ async def main() -> None:
     auto_snapshot_max = int(os.getenv("AUTO_SNAPSHOT_MAX_ENTRIES", "200"))
     auto_repair = os.getenv("AUTO_REPAIR_ON_SNAPSHOT", "false").strip().lower() in {"1", "true", "yes"}
     auto_snapshot_background = os.getenv("AUTO_SNAPSHOT_BACKGROUND", "false").strip().lower() in {"1", "true", "yes"}
+    preference_normalizer_mode = os.getenv("PREFERENCE_NORMALIZER_MODE", "hybrid").strip().lower()
+    preference_normalizer_max_ms = int(os.getenv("PREFERENCE_NORMALIZER_MAX_MS", "1200"))
+    preference_normalizer_enabled = preference_normalizer_mode in {"hybrid", "llm"}
     logging.info(
         "RAG config: source=%s azure_search_endpoint=%s azure_search_index=%s",
         rag_config.source,
@@ -105,10 +109,19 @@ async def main() -> None:
         embedding_config.provider,
         embedding_config.model,
     )
+    logging.info(
+        "Preference normalizer: mode=%s max_ms=%s",
+        preference_normalizer_mode,
+        preference_normalizer_max_ms,
+    )
     if llm_config.provider == "foundry" and not llm_config.foundry_endpoint:
         raise ValueError("FOUNDRY_PROJECT_ENDPOINT is required for Foundry mode")
     preference_pattern = re.compile(
         r"\b(?:my|i)\s+(?:favorite|fav|favourite)\s+([a-zA-Z ]{2,50})\s+is\s+([a-zA-Z ]{2,50})\b",
+        re.IGNORECASE,
+    )
+    preference_reverse_pattern = re.compile(
+        r"\b([a-zA-Z][a-zA-Z \-]{1,50})\s+is\s+(?:my|i)\s+(?:favorite|fav|favourite)\s+([a-zA-Z ]{2,50})\b",
         re.IGNORECASE,
     )
 
@@ -128,10 +141,17 @@ async def main() -> None:
 
     def _extract_preferences(text: str) -> List[Dict[str, Any]]:
         matches = preference_pattern.findall(text or "")
-        entries = []
-        for key, value in matches:
-            key_norm = _normalize_preference_key(key)
-            value_norm = " ".join(value.strip().split())
+        reverse_matches = preference_reverse_pattern.findall(text or "")
+        entries: List[Dict[str, Any]] = []
+        seen = set()
+
+        def _append_preference(raw_key: str, raw_value: str) -> None:
+            key_norm = _normalize_preference_key(raw_key)
+            value_norm = " ".join(raw_value.strip().split())
+            dedupe_key = (key_norm, value_norm.lower())
+            if not key_norm or not value_norm or dedupe_key in seen:
+                return
+            seen.add(dedupe_key)
             entries.append(
                 {
                     "content": f"User favorite {key_norm.replace('_', ' ')} is {value_norm}.",
@@ -144,7 +164,23 @@ async def main() -> None:
                     },
                 }
             )
+
+        for key, value in matches:
+            _append_preference(key, value)
+        for value, key in reverse_matches:
+            _append_preference(key, value)
         return entries
+
+    explicit_cuisine_pattern = re.compile(
+        r"\b(?:options|dishes|food|recipes)\s+in\s+([a-zA-Z][a-zA-Z \-]{1,30})\b",
+        re.IGNORECASE,
+    )
+
+    def _extract_explicit_cuisine_request(text: str) -> Optional[str]:
+        match = explicit_cuisine_pattern.search(text or "")
+        if not match:
+            return None
+        return " ".join(match.group(1).strip().split())
 
     preference_query_pattern = re.compile(
         r"\b(?:what\s+is|tell\s+me)\s+(?:my|the)\s+(?:favorite|fav|favourite)\s+([a-zA-Z ]{1,40})\??\b",
@@ -159,6 +195,129 @@ async def main() -> None:
         if not raw:
             return None
         return _normalize_preference_key(raw)
+
+    def _looks_like_preference_text(text: str) -> bool:
+        t = (text or "").lower()
+        return ("favorite" in t or "favourite" in t or "fav" in t) and ("my" in t or "what is" in t)
+
+    pref_norm_stats = {"calls": 0, "total_ms": 0.0, "max_ms": 0.0}
+
+    def _record_pref_norm_latency(ms: float) -> None:
+        pref_norm_stats["calls"] += 1
+        pref_norm_stats["total_ms"] += ms
+        pref_norm_stats["max_ms"] = max(pref_norm_stats["max_ms"], ms)
+
+    async def _parse_preference_llm(_: str) -> Dict[str, Any]:
+        return {}
+
+    async def _llm_preference_update_entries(user_text: str) -> List[Dict[str, Any]]:
+        started = time.perf_counter()
+        parsed = await _parse_preference_llm(user_text)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _record_pref_norm_latency(elapsed_ms)
+        if elapsed_ms > preference_normalizer_max_ms:
+            logging.warning(
+                "Preference normalizer latency high: mode=update elapsed_ms=%.2f limit_ms=%s",
+                elapsed_ms,
+                preference_normalizer_max_ms,
+            )
+            return []
+
+        updates = parsed.get("updates", []) if isinstance(parsed, dict) else []
+        if not isinstance(updates, list):
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        seen = set()
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            key = _normalize_preference_key(str(update.get("key", "")).strip())
+            value = " ".join(str(update.get("value", "")).strip().split())
+            dedupe_key = (key, value.lower())
+            if not key or not value or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            entries.append(
+                {
+                    "content": f"User favorite {key.replace('_', ' ')} is {value}.",
+                    "source": "user",
+                    "confidence": 0.90,
+                    "metadata": {
+                        "preference_key": key,
+                        "preference_value": value,
+                        "preference_subject": "user",
+                        "normalizer": "llm",
+                    },
+                }
+            )
+        return entries
+
+    async def _llm_preference_query_key(user_text: str) -> Optional[str]:
+        started = time.perf_counter()
+        parsed = await _parse_preference_llm(user_text)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _record_pref_norm_latency(elapsed_ms)
+        if elapsed_ms > preference_normalizer_max_ms:
+            logging.warning(
+                "Preference normalizer latency high: mode=query elapsed_ms=%.2f limit_ms=%s",
+                elapsed_ms,
+                preference_normalizer_max_ms,
+            )
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+        key = str(parsed.get("query_key", "")).strip()
+        if not key:
+            return None
+        return _normalize_preference_key(key)
+
+    async def _extract_preferences_hybrid(user_text: str) -> List[Dict[str, Any]]:
+        deterministic_entries = _extract_preferences(user_text)
+        if preference_normalizer_mode == "deterministic":
+            return deterministic_entries
+        if preference_normalizer_mode == "hybrid" and deterministic_entries:
+            return deterministic_entries
+
+        llm_entries = await _llm_preference_update_entries(user_text)
+        if preference_normalizer_mode == "llm":
+            return llm_entries
+        if not llm_entries:
+            return deterministic_entries
+
+        merged = list(deterministic_entries)
+        seen = {
+            (
+                e.get("metadata", {}).get("preference_key"),
+                str(e.get("metadata", {}).get("preference_value", "")).lower(),
+            )
+            for e in deterministic_entries
+        }
+        for e in llm_entries:
+            key = e.get("metadata", {}).get("preference_key")
+            value = str(e.get("metadata", {}).get("preference_value", "")).lower()
+            if (key, value) in seen:
+                continue
+            seen.add((key, value))
+            merged.append(e)
+        return merged
+
+    async def _extract_preference_query_key_hybrid(user_text: str) -> Optional[str]:
+        key = _extract_preference_query_key(user_text)
+        if key:
+            return key
+        if preference_normalizer_mode == "deterministic":
+            return None
+        if preference_normalizer_mode == "hybrid" and not _looks_like_preference_text(user_text):
+            return None
+        return await _llm_preference_query_key(user_text)
+
+    FACT_PRIORITY_NOTE = (
+        "System note: Preferences are soft personalization signals, not factual truth. "
+        "For factual questions, prioritize verified facts from memory/context and grounded general knowledge. "
+        "Do not override factual answers because of user preferences unless the user explicitly asks for a preference-based recommendation."
+    )
 
     def _parse_iso_ts(value: Optional[str]) -> Optional[datetime]:
         if not value:
@@ -301,7 +460,17 @@ async def main() -> None:
     redis_config = load_redis_config()
     provider = await create_provider()
 
-    thread_id_holder = {"id": redis_config.thread_id or f"memory_diff_thread_{uuid4().hex}"}
+    reuse_thread_on_start = os.getenv("REUSE_CHAT_THREAD_ON_START", "false").strip().lower() in {"1", "true", "yes"}
+    if reuse_thread_on_start:
+        initial_thread_id = redis_config.thread_id or f"memory_diff_thread_{uuid4().hex}"
+    else:
+        initial_thread_id = f"memory_diff_thread_{uuid4().hex}"
+    thread_id_holder = {"id": initial_thread_id}
+    logging.info(
+        "Chat store thread init: reuse_on_start=%s thread_id=%s",
+        reuse_thread_on_start,
+        thread_id_holder["id"],
+    )
     def _new_chat_store_factory() -> RedisChatMessageStore:
         factory = create_chat_store_factory(thread_id_holder, redis_config.redis_url)
         return factory()
@@ -407,6 +576,48 @@ async def main() -> None:
             deployment_name=llm_config.azure_openai_deployment,
             api_key=llm_config.azure_openai_api_key,
         )
+        normalizer_agent = client.as_agent(
+            name="PreferenceNormalizerAgent",
+            instructions=(
+                "Extract user preference query/update intent from one message. "
+                "Return strict JSON only with keys: query_key (string), updates (array of {key, value}). "
+                "If none, return {\"query_key\":\"\",\"updates\":[]}. "
+                "Do not infer non-preference facts."
+            ),
+        )
+
+        async def _parse_preference_llm(user_text: str) -> Dict[str, Any]:
+            if not preference_normalizer_enabled:
+                return {}
+            prompt = (
+                "Message:\n"
+                f"{user_text}\n\n"
+                "Output JSON only. Example: "
+                "{\"query_key\":\"favorite cuisine\",\"updates\":[{\"key\":\"favorite cuisine\",\"value\":\"Italian\"}]}"
+            )
+            try:
+                response = await asyncio.wait_for(
+                    normalizer_agent.run(prompt, thread=normalizer_agent.get_new_thread()),
+                    timeout=max(0.3, preference_normalizer_max_ms / 1000),
+                )
+            except Exception:
+                logging.exception("Preference normalizer LLM call failed")
+                return {}
+            if not response or not response.text:
+                return {}
+            text = response.text.strip()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+                if not match:
+                    logging.warning("Preference normalizer returned non-JSON response")
+                    return {}
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    logging.warning("Preference normalizer returned unparsable JSON")
+                    return {}
 
         def store_snapshot(snapshot_id: str, snapshot_path: str) -> str:
             return store_snapshot_json(snapshot_id, snapshot_path, redis_config.redis_url)
@@ -513,6 +724,7 @@ async def main() -> None:
                     "and diff_snapshots. If asked to repair drift, use repair_snapshot_llm. "
                     "When asked for user preferences (favorite cuisine, etc.), "
                     "first call get_latest_preference and answer from that result. "
+                    "Treat preferences as soft personalization. Facts take priority over preferences. "
                     "If no relevant memory is found, answer from general knowledge and "
                     "label it as such. Prefer memory when available."
                 ),
@@ -592,7 +804,7 @@ async def main() -> None:
                     print("Agent: Thread reset.\n")
                     continue
 
-                queried_pref_key = _extract_preference_query_key(user_input)
+                queried_pref_key = await _extract_preference_query_key_hybrid(user_input)
                 if queried_pref_key:
                     await _flush_snapshot_jobs()
                     pref_result = get_latest_preference(queried_pref_key)
@@ -608,9 +820,33 @@ async def main() -> None:
                     await _schedule_snapshot_if_due()
                     continue
 
+                extracted_prefs = await _extract_preferences_hybrid(user_input)
+                explicit_cuisine = _extract_explicit_cuisine_request(user_input)
+                effective_input = user_input
+                if explicit_cuisine:
+                    effective_input += (
+                        "\n\nSystem note: The user explicitly requested cuisine "
+                        f"'{explicit_cuisine}' for this response. "
+                        "Prioritize this explicit request over remembered preferences."
+                    )
+                if extracted_prefs:
+                    pref_notes = []
+                    for p in extracted_prefs:
+                        key = p.get("metadata", {}).get("preference_key", "")
+                        value = p.get("metadata", {}).get("preference_value", "")
+                        if key and value:
+                            pref_notes.append(f"{key}={value}")
+                    if pref_notes:
+                        effective_input += (
+                            "\n\nSystem note: The user just updated preferences in this message: "
+                            + ", ".join(pref_notes)
+                            + ". Apply them immediately when relevant."
+                        )
+                effective_input += "\n\n" + FACT_PRIORITY_NOTE
+
                 print("Agent: ", end="", flush=True)
                 try:
-                    response = await agent.run(user_input, thread=thread)
+                    response = await agent.run(effective_input, thread=thread)
                 except Exception as exc:
                     if "role 'tool' must be a response to a preceeding message" in str(exc):
                         thread_id_holder["id"] = f"memory_diff_thread_{uuid4().hex}"
@@ -623,7 +859,7 @@ async def main() -> None:
                 print()
 
                 memory_entries.append(_make_entry(user_input, "user"))
-                for pref in _extract_preferences(user_input):
+                for pref in extracted_prefs:
                     memory_entries.append(_make_entry(pref["content"], pref["source"], pref["metadata"]))
                 memory_entries.append(_make_entry(response.text or "", "assistant"))
                 turn_count += 1
@@ -639,6 +875,49 @@ async def main() -> None:
                 credential=credential,
             ) as client,
         ):
+            normalizer_agent = client.as_agent(
+                name="PreferenceNormalizerAgent",
+                instructions=(
+                    "Extract user preference query/update intent from one message. "
+                    "Return strict JSON only with keys: query_key (string), updates (array of {key, value}). "
+                    "If none, return {\"query_key\":\"\",\"updates\":[]}. "
+                    "Do not infer non-preference facts."
+                ),
+            )
+
+            async def _parse_preference_llm(user_text: str) -> Dict[str, Any]:
+                if not preference_normalizer_enabled:
+                    return {}
+                prompt = (
+                    "Message:\n"
+                    f"{user_text}\n\n"
+                    "Output JSON only. Example: "
+                    "{\"query_key\":\"favorite cuisine\",\"updates\":[{\"key\":\"favorite cuisine\",\"value\":\"Italian\"}]}"
+                )
+                try:
+                    response = await asyncio.wait_for(
+                        normalizer_agent.run(prompt, thread=normalizer_agent.get_new_thread()),
+                        timeout=max(0.3, preference_normalizer_max_ms / 1000),
+                    )
+                except Exception:
+                    logging.exception("Preference normalizer LLM call failed")
+                    return {}
+                if not response or not response.text:
+                    return {}
+                text = response.text.strip()
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+                    if not match:
+                        logging.warning("Preference normalizer returned non-JSON response")
+                        return {}
+                    try:
+                        return json.loads(match.group(0))
+                    except json.JSONDecodeError:
+                        logging.warning("Preference normalizer returned unparsable JSON")
+                        return {}
+
             def store_snapshot(snapshot_id: str, snapshot_path: str) -> str:
                 return store_snapshot_json(snapshot_id, snapshot_path, redis_config.redis_url)
 
@@ -726,6 +1005,7 @@ async def main() -> None:
                         "and diff_snapshots. If asked to repair drift, use repair_snapshot_llm. "
                         "When asked for user preferences (favorite cuisine, etc.), "
                         "first call get_latest_preference and answer from that result. "
+                        "Treat preferences as soft personalization. Facts take priority over preferences. "
                         "If no relevant memory is found, answer from general knowledge and "
                         "label it as such. Prefer memory when available."
                     ),
@@ -805,7 +1085,7 @@ async def main() -> None:
                         print("Agent: Thread reset.\n")
                         continue
 
-                    queried_pref_key = _extract_preference_query_key(user_input)
+                    queried_pref_key = await _extract_preference_query_key_hybrid(user_input)
                     if queried_pref_key:
                         await _flush_snapshot_jobs()
                         pref_result = get_latest_preference(queried_pref_key)
@@ -821,10 +1101,34 @@ async def main() -> None:
                         await _schedule_snapshot_if_due()
                         continue
 
+                    extracted_prefs = await _extract_preferences_hybrid(user_input)
+                    explicit_cuisine = _extract_explicit_cuisine_request(user_input)
+                    effective_input = user_input
+                    if explicit_cuisine:
+                        effective_input += (
+                            "\n\nSystem note: The user explicitly requested cuisine "
+                            f"'{explicit_cuisine}' for this response. "
+                            "Prioritize this explicit request over remembered preferences."
+                        )
+                    if extracted_prefs:
+                        pref_notes = []
+                        for p in extracted_prefs:
+                            key = p.get("metadata", {}).get("preference_key", "")
+                            value = p.get("metadata", {}).get("preference_value", "")
+                            if key and value:
+                                pref_notes.append(f"{key}={value}")
+                        if pref_notes:
+                            effective_input += (
+                                "\n\nSystem note: The user just updated preferences in this message: "
+                                + ", ".join(pref_notes)
+                                + ". Apply them immediately when relevant."
+                            )
+                    effective_input += "\n\n" + FACT_PRIORITY_NOTE
+
                     print("Agent: ", end="", flush=True)
                     try:
                         response_text = ""
-                        async for chunk in agent.run_stream(user_input, thread=thread):
+                        async for chunk in agent.run_stream(effective_input, thread=thread):
                             if chunk.text:
                                 response_text += chunk.text
                                 print(chunk.text, end="", flush=True)
@@ -839,13 +1143,22 @@ async def main() -> None:
                         raise
 
                     memory_entries.append(_make_entry(user_input, "user"))
-                    for pref in _extract_preferences(user_input):
+                    for pref in extracted_prefs:
                         memory_entries.append(_make_entry(pref["content"], pref["source"], pref["metadata"]))
                     memory_entries.append(_make_entry(response_text, "assistant"))
                     turn_count += 1
                     await _schedule_snapshot_if_due()
             finally:
                 await _stop_snapshot_worker()
+
+    if pref_norm_stats["calls"] > 0:
+        avg_ms = pref_norm_stats["total_ms"] / pref_norm_stats["calls"]
+        logging.info(
+            "Preference normalizer latency stats: calls=%s avg_ms=%.2f max_ms=%.2f",
+            pref_norm_stats["calls"],
+            avg_ms,
+            pref_norm_stats["max_ms"],
+        )
 
 
 if __name__ == "__main__":

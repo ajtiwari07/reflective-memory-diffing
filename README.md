@@ -118,6 +118,11 @@ AZURE_REDIS_PORT=10000
 
 `AZURE_REDIS_PORT` defaults to `10000` to match Azure Managed Redis defaults; override if your cache uses `6380`.
 
+Chat history replay behavior:
+
+- `REUSE_CHAT_THREAD_ON_START=false` (default): start with a fresh chat thread each app run.
+- `REUSE_CHAT_THREAD_ON_START=true`: reuse `THREAD_ID` and prior chat history from Redis.
+
 ## Snapshot Storage in Redis
 
 Snapshots can be stored and retrieved by id. Keys use:
@@ -159,6 +164,22 @@ run drift repair between the last snapshot and the new one.
 With `AUTO_SNAPSHOT_BACKGROUND=true`, snapshot+repair jobs are queued in a background
 worker to reduce chat latency. Preference queries flush pending jobs before lookup
 to keep latest-value consistency.
+
+## Preference Normalization (Hybrid)
+
+Preference extraction/query routing supports three modes:
+
+```
+PREFERENCE_NORMALIZER_MODE=hybrid
+PREFERENCE_NORMALIZER_MAX_MS=1200
+```
+
+- `deterministic`: regex-only normalization (fastest).
+- `hybrid`: deterministic first, LLM fallback when regex misses.
+- `llm`: LLM-only preference parsing.
+
+Latency is measured for LLM normalization calls and written to `logs/rmd_rag.log`.
+If a call exceeds `PREFERENCE_NORMALIZER_MAX_MS`, the LLM result is ignored for that turn.
 
 ## Hallucination Benchmark
 
