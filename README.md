@@ -1,6 +1,10 @@
 # Reflective Memory Diffing Agent
 
-A Python app that uses **Microsoft Agent Framework** with a **Redis provider** and **Redis chat message store** to drive a reflective memory diffing assistant. The agent can compare two memory snapshot files and explain changes.
+AI assistants can sound confident even when they remember something incorrectly. This project helps reduce those hallucinations by checking what the assistant remembers against earlier snapshots, identifying contradictions, stale facts, and unsupported claims, and repairing or removing memories that do not hold up.
+
+In plain terms, it gives an assistant a way to reflect before trusting its own memory. It keeps useful updates, flags uncertainty, and uses supporting context when available so responses can stay grounded over time.
+
+The project includes a Python implementation with optional Redis storage and retrieval-augmented repair. The technical details are described below.
 
 ## What The Agent Does
 
